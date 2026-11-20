@@ -209,6 +209,31 @@ export async function sendPrivateReply(
 }
 
 /**
+ * Send a message body as-is (text, quick replies or a button template) to a
+ * comment (private reply) or to a user by IGSID. Used by multi-step flows.
+ */
+export async function sendMessage(
+  auth: MetaAuth,
+  instagramAccountId: string,
+  recipient: { comment_id: string } | { id: string },
+  message: Record<string, unknown>
+): Promise<{ recipient_id: string; message_id: string }> {
+  const response = await fetch(
+    `${instagramGraphBase(auth)}/${instagramAccountId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${tokenOf(auth)}`,
+      },
+      body: JSON.stringify({ recipient, message }),
+    }
+  );
+
+  return handleResponse(response);
+}
+
+/**
  * Send a private reply to a comment as a button template — an opening message
  * plus a postback button. Tapping the button opens the conversation and fires
  * a `messaging_postbacks` webhook carrying `payload`, which we use to deliver

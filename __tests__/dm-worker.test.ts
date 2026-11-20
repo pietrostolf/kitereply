@@ -119,6 +119,16 @@ vi.mock("@/lib/queue/client", () => ({
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
+  FLOW_REMINDER_JOB_NAME: "process-flow-reminder",
+}));
+
+// Flows have their own tests (flow-engine.test.ts); here campaigns have no flow.
+vi.mock("@/lib/flows/engine", () => ({
+  getFlow: () => null,
+  handleFlowAnswer: async () => false,
+  handleFlowPayload: async () => false,
+  runStep: vi.fn(),
+  sendFlowReminder: vi.fn(),
 }));
 
 vi.mock("bullmq", () => {
