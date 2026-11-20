@@ -1,5 +1,5 @@
 import type { Prisma } from "@/app/generated/prisma/client";
-import { TRACKED_LINK_ORDER } from "@/lib/tracking/link-order";
+import { FLOW_LINK_POSITION, TRACKED_LINK_ORDER } from "@/lib/tracking/link-order";
 import { generateTrackedLinkSlug } from "@/lib/tracking/server";
 
 // The primary button's title is stored on the campaign as `linkButtonLabel`,
@@ -88,7 +88,7 @@ export async function syncCampaignLinks(
   if (!primaryChanged && !secondaryChanged) return;
 
   const [primary, secondary, ...rest] = await tx.trackedLink.findMany({
-    where: { automationId },
+    where: { automationId, position: { lt: FLOW_LINK_POSITION } },
     orderBy: TRACKED_LINK_ORDER,
     select: { id: true, position: true },
   });

@@ -124,10 +124,10 @@ vi.mock("@/lib/queue/client", () => ({
 
 // Flows have their own tests (flow-engine.test.ts); here campaigns have no flow.
 vi.mock("@/lib/flows/engine", () => ({
-  getFlow: () => null,
-  handleFlowAnswer: async () => false,
-  handleFlowPayload: async () => false,
-  runStep: vi.fn(),
+  getFlow: vi.fn(() => null),
+  handleFlowAnswer: vi.fn(async () => false),
+  handleFlowPayload: vi.fn(async () => false),
+  runStep: vi.fn(async () => undefined),
   sendFlowReminder: vi.fn(),
 }));
 
@@ -150,6 +150,7 @@ vi.mock("bullmq", () => {
 import { MetaApiError, RateLimitError } from "@/lib/meta/client";
 import { createDMWorker } from "../lib/queue/dm-worker";
 import { getRedisConnection } from "@/lib/queue/client";
+import { getFlow, handleFlowPayload, runStep } from "@/lib/flows/engine";
 import { hashRecipientId } from "@/lib/tracking/server";
 
 const usagePeriodStart = new Date("2026-05-01T00:00:00.000Z");
@@ -1780,4 +1781,67 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+
+describe("DM Worker — multi-step flows", () => {
+  const flow = { start: "s1", steps: [{ id: "s1", text: "Oi" }] };
+
+  it("starts the flow with a private reply and logs it as sent", async () => {
+    vi.mocked(getFlow).mockReturnValue(flow);
+    await getProcessor()(createMockJob());
+
+    expect(runStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipient: { commentId: "comment_555" },
+        stepId: "s1",
+        opId: "comment:comment_555",
+      })
+    );
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "SENT" }) })
+    );
+    vi.mocked(getFlow).mockReturnValue(null);
+  });
+
+  it("logs a failure when the flow can't send", async () => {
+    vi.mocked(getFlow).mockReturnValue(flow);
+    vi.mocked(runStep).mockRejectedValueOnce(new Error('Flow step "s1" not found'));
+    await expect(getProcessor()(createMockJob())).rejects.toThrow();
+
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "FAILED" }) })
+    );
+    vi.mocked(getFlow).mockReturnValue(null);
+  });
+
+  it("routes a flow quick reply before any keyword campaign", async () => {
+    vi.mocked(handleFlowPayload).mockResolvedValueOnce(true);
+    await getProcessor()({
+      name: "process-message",
+      id: "message_job_1",
+      attemptsMade: 0,
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_1",
+        messageText: "Brasil",
+        senderId: "commenter_999",
+        quickReplyPayload: "flow:auto_789:s1:0",
+      },
+    });
+
+    expect(handleFlowPayload).toHaveBeenCalledWith("commenter_999", "flow:auto_789:s1:0", "ig_456", "message:mid_1");
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+  });
+
+  it("hands flow postbacks to the flow engine", async () => {
+    vi.mocked(handleFlowPayload).mockResolvedValueOnce(true);
+    await getProcessor()(
+      createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "flow:auto_789:s1:1", mid: "mid_9" })
+    );
+
+    expect(handleFlowPayload).toHaveBeenCalledWith("commenter_999", "flow:auto_789:s1:1", "ig_456", "postback:mid_9");
+    expect(mockPrisma.automation.findFirst).not.toHaveBeenCalled();
+  });
 });

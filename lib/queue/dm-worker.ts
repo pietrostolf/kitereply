@@ -676,6 +676,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           userId: commenterId,
           username: commenterName,
           stepId: flow.start,
+          opId: `comment:${commentId}`,
         });
       } else if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
@@ -901,7 +902,7 @@ async function sendFollowRecheckAck({
  */
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
-  if (await handleFlowPayload(userId, payload, instagramAccountId)) return;
+  if (await handleFlowPayload(userId, payload, instagramAccountId, `postback:${job.data.mid ?? job.id}`)) return;
 
   const isFollowCheck = payload.startsWith("followcheck:");
   if (!isFollowCheck && !payload.startsWith("reveal:")) return;
@@ -1294,8 +1295,9 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const { instagramAccountId, messageId, messageText, senderId } = job.data;
   // A flow's quick-reply tap or typed answer must not fall through to keyword campaigns.
-  if (job.data.quickReplyPayload && (await handleFlowPayload(senderId, job.data.quickReplyPayload, instagramAccountId))) return;
-  if (await handleFlowAnswer(senderId, instagramAccountId, messageText)) return;
+  const opId = `message:${messageId}`;
+  if (job.data.quickReplyPayload && (await handleFlowPayload(senderId, job.data.quickReplyPayload, instagramAccountId, opId))) return;
+  if (await handleFlowAnswer(senderId, instagramAccountId, messageText, opId)) return;
 
   const automations = await prisma.automation.findMany({
     where: {
@@ -1563,7 +1565,7 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   }
   if (job.name === FLOW_REMINDER_JOB_NAME) {
     const { automationId, stepId, userId } = job.data as ProcessFlowReminderJob;
-    return sendFlowReminder(automationId, stepId, userId);
+    return sendFlowReminder(automationId, stepId, userId, `reminder:${job.id}`);
   }
   return processComment(job as Job<ProcessCommentJob>);
 }

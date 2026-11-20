@@ -14,3 +14,10 @@ export const TRACKED_LINK_ORDER = [
   { createdAt: "asc" },
   { id: "asc" },
 ] satisfies Prisma.TrackedLinkOrderByWithRelationInput[];
+
+/**
+ * Position given to links created by multi-step flows. The campaign editor
+ * only manages links below it, so editing a campaign never rewrites or deletes
+ * a link a flow already sent.
+ */
+export const FLOW_LINK_POSITION = 100;

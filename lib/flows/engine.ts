@@ -1,16 +1,23 @@
+import { createHash } from "node:crypto";
+import { reserveWorkspaceDMSend } from "@/lib/billing/usage";
 import { prisma } from "@/lib/db/client";
-import { sendMessage } from "@/lib/meta/client";
+import { RateLimitError, sendMessage } from "@/lib/meta/client";
 import { createInstagramContext, type InstagramContext } from "@/lib/instagram/context";
 import { getDMQueue, getRedisConnection, FLOW_REMINDER_JOB_NAME } from "@/lib/queue/client";
+import { FLOW_LINK_POSITION } from "@/lib/tracking/link-order";
 import { buildTrackedUrl } from "@/lib/tracking/message";
 import { generateTrackedLinkSlug, hashRecipientId } from "@/lib/tracking/server";
+import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 
 /**
  * Multi-step DM flows (the ManyChat replacement). A flow is a list of steps
- * stored as JSON on Automation.flow; payloads `flow:<automationId>:<stepId>[:<button>]`
- * carry taps back here. Meta allows one private reply per comment, so a flow
- * only continues after the person taps or types: the start step must ask
- * something (buttons or a question).
+ * stored as JSON on Automation.flow; payloads `flow:<automationId>:<stepId>[~r]:<button>`
+ * carry taps back here (`~r` = a reminder's button). Meta allows one private
+ * reply per comment, so a flow only continues after the person taps or types:
+ * the start step must ask something (buttons or a question).
+ *
+ * Every handler takes an `opId` (the inbound comment/postback/message id) so a
+ * retried job skips messages it already delivered instead of sending twice.
  */
 
 export type FlowButton = {
@@ -42,7 +49,8 @@ export type FlowStep = {
   existing?: string;
   /** Run right after this one (only after the person has interacted). */
   next?: string;
-  /** Sent `hours` later only if no link of this flow was clicked. */
+  /** Sent `hours` later (max 23, inside Meta's 24h window) only if no link of
+   *  this flow was clicked. */
   reminder?: { hours: number; text: string; buttons?: FlowButton[] };
 };
 
@@ -55,10 +63,15 @@ type FlowAutomation = {
   instagramAccount: { instagramId: string; id: string };
 };
 
+type MetaContext = Extract<InstagramContext, { provider: "META" }>;
+
 export type Recipient = { commentId: string } | { userId: string };
 
 const WAIT_TTL_SECONDS = 24 * 60 * 60; // Meta's messaging window
+const SENT_TTL_SECONDS = 7 * 24 * 60 * 60; // longer than any job retry
+const REMINDER_SUFFIX = "~r";
 const waitKey = (igId: string, userId: string) => `flow_wait:${igId}:${userId}`;
+const opHash = (opId: string) => createHash("sha256").update(opId).digest("hex").slice(0, 24);
 
 export function getFlow(automation: { flow: unknown }): Flow | null {
   const flow = automation.flow as Flow | null;
@@ -77,30 +90,33 @@ export function normalizeAnswer(ask: "email" | "phone", text: string): string | 
   return digits.replace(/\D/g, "").length >= 10 ? digits : null;
 }
 
+/** A message that is clearly not an attempt to answer (a question, a sentence). */
+function looksLikeOtherMessage(ask: "email" | "phone", text: string) {
+  const t = text.trim();
+  return ask === "email" ? !t.includes("@") && t.split(/\s+/).length > 3 : !/\d/.test(t);
+}
+
 async function upsertContact(
   workspaceId: string,
   igsid: string,
   data: { username?: string | null; tags?: string[]; email?: string; phone?: string; consent?: boolean }
 ) {
-  const existing = await prisma.contact.findUnique({
-    where: { workspaceId_igsid: { workspaceId, igsid } },
-  });
-  const tags = [...new Set([...(existing?.tags ?? []), ...(data.tags ?? [])])];
+  const where = { workspaceId_igsid: { workspaceId, igsid } };
+  const existing = await prisma.contact.findUnique({ where });
   const fields = {
     ...(data.username ? { username: data.username } : {}),
     ...(data.email ? { email: data.email } : {}),
     ...(data.phone ? { phone: data.phone } : {}),
     ...(data.consent && !existing?.consentAt ? { consentAt: new Date() } : {}),
-    tags,
+    tags: [...new Set([...(existing?.tags ?? []), ...(data.tags ?? [])])],
   };
-  return existing
-    ? prisma.contact.update({ where: { id: existing.id }, data: fields })
-    : prisma.contact.create({ data: { workspaceId, igsid, ...fields } });
+  // upsert, not find-then-create: two jobs for the same new person may race.
+  return prisma.contact.upsert({ where, create: { workspaceId, igsid, ...fields }, update: fields });
 }
 
 async function trackedUrl(automation: FlowAutomation, url: string, userId: string) {
   let link = await prisma.trackedLink.findFirst({
-    where: { automationId: automation.id, destinationUrl: url },
+    where: { automationId: automation.id, destinationUrl: url, position: FLOW_LINK_POSITION },
   });
   link ??= await prisma.trackedLink.create({
     data: {
@@ -108,7 +124,7 @@ async function trackedUrl(automation: FlowAutomation, url: string, userId: strin
       automationId: automation.id,
       slug: generateTrackedLinkSlug(),
       destinationUrl: url,
-      position: 100, // after the campaign's own links
+      position: FLOW_LINK_POSITION, // kept apart from the campaign's own links
     },
   });
   return buildTrackedUrl(link.slug, undefined, hashRecipientId(userId));
@@ -117,15 +133,19 @@ async function trackedUrl(automation: FlowAutomation, url: string, userId: strin
 /** Build the Messenger-format message for a step's text and buttons. */
 export async function buildMessage(
   automation: FlowAutomation,
-  stepId: string,
+  payloadStepId: string,
   text: string,
   buttons: FlowButton[] | undefined,
   userId: string,
-  extraQuickReply?: string
+  skipLabel?: string
 ): Promise<Record<string, unknown>> {
-  const payload = (i: number) => `flow:${automation.id}:${stepId}:${i}`;
+  const payload = (i: number | "skip") => `flow:${automation.id}:${payloadStepId}:${i}`;
   const list = buttons ?? [];
-  if (list.length > 0 && list.length <= 3) {
+  if (list.some((b) => b.url) && (list.length > 3 || skipLabel)) {
+    // Quick replies can't open links; fail loudly instead of sending dead buttons.
+    throw new Error(`Flow step "${payloadStepId}": links need 3 buttons or fewer and no skip option`);
+  }
+  if (list.length > 0 && list.length <= 3 && !skipLabel) {
     return {
       attachment: {
         type: "template",
@@ -143,10 +163,11 @@ export async function buildMessage(
       },
     };
   }
-  const quick = list.map((b, i) => ({ content_type: "text", title: b.title.slice(0, 20), payload: payload(i) }));
-  if (extraQuickReply)
-    quick.push({ content_type: "text", title: extraQuickReply.slice(0, 20), payload: `flow:${automation.id}:${stepId}:skip` });
-  return quick.length ? { text: text.slice(0, 1000), quick_replies: quick.slice(0, 13) } : { text: text.slice(0, 1000) };
+  const quick = list
+    .slice(0, skipLabel ? 12 : 13)
+    .map((b, i) => ({ content_type: "text", title: b.title.slice(0, 20), payload: payload(i) }));
+  if (skipLabel) quick.push({ content_type: "text", title: skipLabel.slice(0, 20), payload: payload("skip") });
+  return quick.length ? { text: text.slice(0, 1000), quick_replies: quick } : { text: text.slice(0, 1000) };
 }
 
 type RunArgs = {
@@ -156,23 +177,81 @@ type RunArgs = {
   userId: string;
   username?: string | null;
   stepId: string;
+  /** Inbound event id: makes retries skip what was already sent. */
+  opId: string;
   /** Guards against a step chain that loops. */
   depth?: number;
 };
 
+/**
+ * Send `message` once per (opId, key). Returns false when a previous attempt
+ * of the same job already delivered it.
+ */
+async function sendOnce(
+  context: MetaContext,
+  automation: FlowAutomation,
+  recipient: Recipient,
+  opId: string,
+  key: string,
+  message: Record<string, unknown>
+): Promise<boolean> {
+  const redis = getRedisConnection();
+  const sentKey = `flow_sent:${opHash(opId)}:${key}`;
+  if (await redis.exists(sentKey)) return false;
+  // The comment path already reserved quota and rate limit for its private reply.
+  if (!("commentId" in recipient)) {
+    const igId = automation.instagramAccount.instagramId;
+    const slot = await reserveDMSlot(igId);
+    const usage = await reserveWorkspaceDMSend(automation.workspaceId);
+    if (!slot.allowed || !usage.allowed)
+      throw new RateLimitError(`Flow DM limit reached for ${igId}`, undefined, undefined, 4);
+  }
+  await sendMessage(context, automation.instagramAccount.instagramId, toMetaRecipient(recipient), message);
+  await redis.set(sentKey, "1", "EX", SENT_TTL_SECONDS);
+  return true;
+}
+
+/** After the message is out, a failing side effect must not make the send look failed. */
+async function sideEffect(automation: FlowAutomation, what: string, fn: () => Promise<unknown>) {
+  try {
+    await fn();
+  } catch (error) {
+    await prisma.operationalEvent
+      .create({
+        data: {
+          workspaceId: automation.workspaceId,
+          source: "WORKER",
+          level: "WARNING",
+          message: `Fluxo: ${what} falhou depois do envio`,
+          payload: { automationId: automation.id, error: String(error) },
+        },
+      })
+      .catch(() => undefined);
+  }
+}
+
+/**
+ * Run one step (and the steps chained after it). Throws on a misconfigured
+ * flow so the caller records a failure instead of a false "sent".
+ */
 export async function runStep(args: RunArgs): Promise<void> {
-  const { context, automation, recipient, userId, username } = args;
+  const { context, automation, recipient, userId, username, opId } = args;
   const depth = args.depth ?? 0;
-  const flow = getFlow(automation);
-  const step = flow?.steps.find((s) => s.id === args.stepId);
-  if (!flow || !step || depth > 10) return;
-  if (context.provider !== "META") return; // shortcut: flows are Meta-only, add Zernio when a Zernio account needs them
+  const step = getFlow(automation)?.steps.find((s) => s.id === args.stepId);
+  if (!step) throw new Error(`Flow step "${args.stepId}" not found in campaign ${automation.id}`);
+  if (depth > 10) throw new Error(`Flow ${automation.id} loops through more than 10 steps`);
+  if (context.provider !== "META") throw new Error("Flows need a Meta-connected account"); // shortcut: Zernio not wired, add when a Zernio account needs flows
 
   const igId = automation.instagramAccount.instagramId;
   const contact = await upsertContact(automation.workspaceId, userId, { username, tags: step.tags });
 
   if (step.gift) {
-    const result = contact.email ? await claimGift(step.gift, contact.email, contact.username) : "error";
+    const redis = getRedisConnection();
+    const giftKey = `flow_gift:${opHash(opId)}:${step.id}`;
+    const result =
+      ((await redis.get(giftKey)) as GiftResult | null) ??
+      (contact.email ? await claimGift(step.gift, contact.email, contact.username) : "error");
+    if (result !== "error") await redis.set(giftKey, result, "EX", SENT_TTL_SECONDS);
     if (result === "error") {
       // Never tell someone to check their email when no invite went out.
       await prisma.operationalEvent.create({
@@ -184,32 +263,40 @@ export async function runStep(args: RunArgs): Promise<void> {
           payload: { automationId: automation.id, igsid: userId, email: contact.email },
         },
       });
-      await sendText(context, igId, recipient, "Recebi seu e-mail! 🎒 O presente vai chegar em algumas horas, tá? Se tiver qualquer dúvida, é só mandar aqui.", username);
+      await sendOnce(context, automation, recipient, opId, `${step.id}:gifterr`, {
+        text: "Recebi seu e-mail! 🎒 O presente vai chegar em algumas horas, tá? Se tiver qualquer dúvida, é só mandar aqui.",
+      });
       return;
     }
-    if (step.text) await sendText(context, igId, recipient, step.text, username);
+    if (step.text)
+      await sendOnce(context, automation, recipient, opId, step.id, { text: render(step.text, username).slice(0, 1000) });
     const nextId = result === "existing" ? step.existing ?? step.next : step.next;
     if (nextId) await runStep({ ...args, stepId: nextId, depth: depth + 1 });
     return;
   }
 
-  const text = render(step.text, username);
-  const message = await buildMessage(automation, step.id, text, step.buttons, userId, step.ask ? step.skipLabel : undefined);
-  await sendMessage(context, igId, toMetaRecipient(recipient), message);
+  const message = await buildMessage(automation, step.id, render(step.text, username), step.buttons, userId, step.ask ? step.skipLabel : undefined);
+  const sentNow = await sendOnce(context, automation, recipient, opId, step.id, message);
 
   if (step.ask) {
-    await getRedisConnection().set(
-      waitKey(igId, userId),
-      JSON.stringify({ automationId: automation.id, stepId: step.id, tries: 0 }),
-      "EX",
-      WAIT_TTL_SECONDS
+    await sideEffect(automation, "guardar a pergunta pendente", () =>
+      getRedisConnection().set(
+        waitKey(igId, userId),
+        JSON.stringify({ automationId: automation.id, stepId: step.id, tries: 0 }),
+        "EX",
+        WAIT_TTL_SECONDS
+      )
     );
   }
-  if (step.reminder) {
-    await getDMQueue().add(
-      FLOW_REMINDER_JOB_NAME,
-      { instagramAccountId: igId, accountConnectionId: automation.instagramAccount.id, userId, automationId: automation.id, stepId: step.id },
-      { delay: step.reminder.hours * 3600_000, jobId: `flowrem_${automation.id}_${step.id}_${userId}` }
+  if (step.reminder && sentNow) {
+    const hours = Math.min(step.reminder.hours, 23);
+    await sideEffect(automation, "agendar o lembrete", () =>
+      getDMQueue().add(
+        FLOW_REMINDER_JOB_NAME,
+        { instagramAccountId: igId, accountConnectionId: automation.instagramAccount.id, userId, automationId: automation.id, stepId: step.id },
+        // Unique per delivery: a fixed id would be ignored while BullMQ keeps the last run.
+        { delay: hours * 3600_000, jobId: `flowrem_${opHash(opId)}_${opHash(step.id)}` }
+      )
     );
   }
   // A private reply can't be followed by more messages until the person answers.
@@ -219,9 +306,11 @@ export async function runStep(args: RunArgs): Promise<void> {
 }
 
 /** Handle a flow button tap (postback or quick reply payload). Returns false if not a flow payload. */
-export async function handleFlowPayload(userId: string, payload: string, igId: string): Promise<boolean> {
+export async function handleFlowPayload(userId: string, payload: string, igId: string, opId: string): Promise<boolean> {
   if (!payload.startsWith("flow:")) return false;
-  const [, automationId, stepId, choice] = payload.split(":");
+  const [, automationId, rawStepId = "", choice] = payload.split(":");
+  const fromReminder = rawStepId.endsWith(REMINDER_SUFFIX);
+  const stepId = fromReminder ? rawStepId.slice(0, -REMINDER_SUFFIX.length) : rawStepId;
   const automation = await prisma.automation.findFirst({
     where: { id: automationId, isActive: true },
     include: { instagramAccount: true },
@@ -230,59 +319,63 @@ export async function handleFlowPayload(userId: string, payload: string, igId: s
   // The payload comes from the user's tap: only act on this account's own flows.
   if (!automation || !step || automation.instagramAccount.instagramId !== igId) return true;
 
-  const base = { context: await createInstagramContext(automation.instagramAccount), userId };
-  if (base.context.provider !== "META") return true;
+  const base = { context: await createInstagramContext(automation.instagramAccount), userId, opId };
   if (choice === "skip") {
-    await getRedisConnection().del(waitKey(igId, base.userId));
-    if (step.next) await runStep({ ...base, automation, recipient: { userId: base.userId }, stepId: step.next });
+    await getRedisConnection().del(waitKey(igId, userId));
+    if (step.next) await runStep({ ...base, automation, recipient: { userId }, stepId: step.next });
     return true;
   }
-  const button = step.buttons?.[Number(choice)];
+  const button = (fromReminder ? step.reminder?.buttons : step.buttons)?.[Number(choice)];
   if (!button) return true;
-  if (button.tags?.length) await upsertContact(automation.workspaceId, base.userId, { tags: button.tags });
-  if (button.next) await runStep({ ...base, automation, recipient: { userId: base.userId }, stepId: button.next });
+  if (button.tags?.length) await upsertContact(automation.workspaceId, userId, { tags: button.tags });
+  if (button.next) await runStep({ ...base, automation, recipient: { userId }, stepId: button.next });
   return true;
 }
 
 /** Handle a typed DM while a flow waits for an answer. Returns false if nothing was waiting. */
-export async function handleFlowAnswer(userId: string, igId: string, text: string): Promise<boolean> {
+export async function handleFlowAnswer(userId: string, igId: string, text: string, opId: string): Promise<boolean> {
   const redis = getRedisConnection();
-  const raw = await redis.get(waitKey(igId, userId));
+  const key = waitKey(igId, userId);
+  const raw = await redis.get(key);
   if (!raw) return false;
   const wait = JSON.parse(raw) as { automationId: string; stepId: string; tries: number };
   const automation = await prisma.automation.findFirst({
-    where: { id: wait.automationId },
+    where: { id: wait.automationId, isActive: true },
     include: { instagramAccount: true },
   });
   const step = automation && getFlow(automation)?.steps.find((s) => s.id === wait.stepId);
   if (!automation || !step?.ask) {
-    await redis.del(waitKey(igId, userId));
+    await redis.del(key);
     return false;
   }
-  const base = { context: await createInstagramContext(automation.instagramAccount), userId };
-  if (base.context.provider !== "META") return true;
+  // A question or comment from the person goes to the normal handling (keyword campaigns, a human).
+  if (looksLikeOtherMessage(step.ask, text)) return false;
+  const context = await createInstagramContext(automation.instagramAccount);
+  if (context.provider !== "META") return false;
 
   const value = normalizeAnswer(step.ask, text);
   if (!value) {
     if (wait.tries >= 2) {
-      await redis.del(waitKey(igId, base.userId));
-      return true;
+      await redis.del(key);
+      return false;
     }
-    await redis.set(waitKey(igId, base.userId), JSON.stringify({ ...wait, tries: wait.tries + 1 }), "EX", WAIT_TTL_SECONDS);
+    await redis.set(key, JSON.stringify({ ...wait, tries: wait.tries + 1 }), "EX", WAIT_TTL_SECONDS);
     const retry = step.invalidText ?? (step.ask === "email" ? "Hmm, esse e-mail não parece certo. Pode mandar de novo?" : "Hmm, esse número não parece certo. Manda com DDD, por favor?");
-    const message = await buildMessage(automation, step.id, retry, undefined, base.userId, step.skipLabel);
-    await sendMessage(base.context, igId, { id: base.userId }, message);
+    const message = await buildMessage(automation, step.id, retry, undefined, userId, step.skipLabel);
+    await sendOnce(context, automation, { userId }, opId, `${step.id}:retry`, message);
     return true;
   }
 
-  await redis.del(waitKey(igId, base.userId));
-  await upsertContact(automation.workspaceId, base.userId, step.ask === "email" ? { email: value, consent: true } : { phone: value });
-  if (step.next) await runStep({ ...base, automation, recipient: { userId: base.userId }, stepId: step.next });
+  await upsertContact(automation.workspaceId, userId, step.ask === "email" ? { email: value, consent: true } : { phone: value });
+  if (step.next) await runStep({ context, automation, recipient: { userId }, userId, opId, stepId: step.next });
+  // Cleared only after the next steps ran, so a retried job still finds it; and
+  // only if those steps didn't already store a new question under the same key.
+  if ((await redis.get(key)) === raw) await redis.del(key);
   return true;
 }
 
 /** Delayed reminder: send only if none of this flow's links was clicked by the person. */
-export async function sendFlowReminder(automationId: string, stepId: string, userId: string) {
+export async function sendFlowReminder(automationId: string, stepId: string, userId: string, opId: string) {
   const automation = await prisma.automation.findFirst({
     where: { id: automationId, isActive: true },
     include: { instagramAccount: true },
@@ -298,8 +391,8 @@ export async function sendFlowReminder(automationId: string, stepId: string, use
   const contact = await prisma.contact.findUnique({
     where: { workspaceId_igsid: { workspaceId: automation.workspaceId, igsid: userId } },
   });
-  const message = await buildMessage(automation, `${stepId}`, render(step.reminder.text, contact?.username), step.reminder.buttons, userId);
-  await sendMessage(context, automation.instagramAccount.instagramId, { id: userId }, message);
+  const message = await buildMessage(automation, `${stepId}${REMINDER_SUFFIX}`, render(step.reminder.text, contact?.username), step.reminder.buttons, userId);
+  await sendOnce(context, automation, { userId }, opId, `${stepId}${REMINDER_SUFFIX}`, message);
 }
 
 function render(text: string, username?: string | null) {
@@ -310,16 +403,14 @@ function toMetaRecipient(r: Recipient) {
   return "commentId" in r ? { comment_id: r.commentId } : { id: r.userId };
 }
 
-async function sendText(context: Extract<InstagramContext, { provider: "META" }>, igId: string, recipient: Recipient, text: string, username?: string | null) {
-  await sendMessage(context, igId, toMetaRecipient(recipient), { text: render(text, username).slice(0, 1000) });
-}
+type GiftResult = "invited" | "existing" | "error";
 
 /**
  * Ask the community platform to invite the email to a promotion.
  * Returns "invited", "existing" or "error". The endpoint is the platform's
  * gift function (GIFT_ENDPOINT_URL), authenticated with a shared secret.
  */
-async function claimGift(promo: string, email: string, instagram: string | null): Promise<"invited" | "existing" | "error"> {
+async function claimGift(promo: string, email: string, instagram: string | null): Promise<GiftResult> {
   const url = process.env.GIFT_ENDPOINT_URL;
   const secret = process.env.GIFT_ENDPOINT_SECRET;
   if (!url || !secret) return "error";
@@ -328,6 +419,7 @@ async function claimGift(promo: string, email: string, instagram: string | null)
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
       body: JSON.stringify({ promo, email, instagram }),
+      signal: AbortSignal.timeout(15_000),
     });
     const data = (await res.json()) as { result?: string };
     return data.result === "existing" ? "existing" : res.ok ? "invited" : "error";
