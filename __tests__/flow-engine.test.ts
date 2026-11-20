@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { sendMessage, redis, queueAdd, db } = vi.hoisted(() => {
   const store = new Map<string, string>();
   return {
-    sendMessage: vi.fn(async () => ({ recipient_id: "u1", message_id: "m1" })),
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    sendMessage: vi.fn(async (..._args: unknown[]) => ({ recipient_id: "u1", message_id: "m1" })),
     queueAdd: vi.fn(),
     redis: {
       store,
@@ -54,7 +55,7 @@ const flow: Flow = {
   ],
 };
 const automation = { id: "a1", workspaceId: "w1", flow, isActive: true, instagramAccount: { id: "acc1", instagramId: "ig1" } };
-const context = { provider: "META" as const, accessToken: "t", instagramId: "ig1" };
+const context = { provider: "META" as const, accessToken: "t", instagramId: "ig1", unifiedLogin: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -80,14 +81,14 @@ describe("normalizeAnswer", () => {
 
 describe("buildMessage", () => {
   it("uses a button template with tracked links for up to 3 buttons", async () => {
-    const msg = (await buildMessage(automation, "link", "Veja", flow.steps[5].buttons, "u1")) as any;
+    const msg = (await buildMessage(automation, "link", "Veja", flow.steps[5].buttons, "u1")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     const b = msg.attachment.payload.buttons[0];
     expect(b.type).toBe("web_url");
     expect(b.url).toContain("/r/abc?r=");
   });
   it("uses quick replies for more than 3 options", async () => {
     const buttons = ["A", "B", "C", "D"].map((title) => ({ title, next: "s2" }));
-    const msg = (await buildMessage(automation, "s1", "Escolha", buttons, "u1", "Pular")) as any;
+    const msg = (await buildMessage(automation, "s1", "Escolha", buttons, "u1", "Pular")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     expect(msg.quick_replies).toHaveLength(5);
     expect(msg.quick_replies[4].payload).toBe("flow:a1:s1:skip");
   });
