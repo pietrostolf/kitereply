@@ -18,6 +18,8 @@ import { useRouter } from "next/navigation";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import PostPicker from "@/components/post-picker";
 import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
+import FlowFormEditor from "@/components/flow-form";
+import type { FlowFormInput } from "@/lib/flows/templates";
 import { readCache, writeCache } from "@/lib/client-cache";
 import {
   IMPORT_QUEUE_KEY,
@@ -31,6 +33,7 @@ type MatchMode = "specific" | "any";
 interface LoadedCampaign {
   id: string;
   name: string;
+  flow?: { form?: FlowFormInput } | null;
   postId: string | null;
   postUrl: string | null;
   pendingNextReel: boolean;
@@ -185,6 +188,9 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
   const [followUpMessage, setFollowUpMessage] = useState("");
   const [followUpDelayMinutes, setFollowUpDelayMinutes] = useState(0);
 
+  // Multi-step flow form; null = the classic opening/link DM below.
+  const [flowForm, setFlowForm] = useState<FlowFormInput | null>(null);
+
   const [previewTab, setPreviewTab] = useState<PreviewTab>("dm");
 
   // CSV import queue. When present, each save advances to the next row instead
@@ -276,6 +282,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         setOpeningDmMessage(c.openingDmMessage ?? "");
         setOpeningDmButtonLabel(c.openingDmButtonLabel ?? "");
         setDmMessage(c.dmMessage);
+        setFlowForm(c.flow?.form ?? null);
         setLinkButtonLabel(c.linkButtonLabel ?? "Open link");
         setIsActive(c.isActive);
         const link = c.trackedLinks?.[0]?.destinationUrl ?? "";
@@ -396,8 +403,9 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       return setError(t("Pick a post or reel to trigger the campaign."));
     if (matchMode === "specific" && keywords.length === 0)
       return setError(t("Add at least one keyword, or switch to any word."));
-    if (!dmMessage.trim()) return setError(t("Add the DM with the link."));
-    if (openingDmEnabled && (!openingDmMessage.trim() || !openingDmButtonLabel.trim()))
+    if (flowForm && !flowForm.opening.trim()) return setError("Escreva a primeira DM do fluxo.");
+    if (!flowForm && !dmMessage.trim()) return setError(t("Add the DM with the link."));
+    if (!flowForm && openingDmEnabled && (!openingDmMessage.trim() || !openingDmButtonLabel.trim()))
       return setError(t("Your opening DM needs a message and a button label."));
 
     setSaving(true);
@@ -413,7 +421,9 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       keywords: matchMode === "any" ? [] : keywords,
       wholeWordMatch,
       dmTriggerEnabled,
-      dmMessage,
+      // A flow sends its own steps; dmMessage just has to be non-empty.
+      dmMessage: flowForm ? flowForm.opening : dmMessage,
+      flow: flowForm,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled ? openingDmMessage : null,
       openingDmButtonLabel: openingDmEnabled ? openingDmButtonLabel : null,
@@ -814,6 +824,11 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
           )}
         </Section>
 
+        <Section title="Tipo de conversa">
+          <FlowFormEditor value={flowForm} onChange={setFlowForm} />
+        </Section>
+
+        {!flowForm && (<>
         <Section title={t("They will get")}>
           <div className="rounded-lg border border-border p-3">
             <div className="flex items-center justify-between">
@@ -992,6 +1007,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
             )}
           </div>
         </Section>
+        </>)}
       </div>
 
       {/* Right: preview */}

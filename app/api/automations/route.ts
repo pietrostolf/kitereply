@@ -15,6 +15,8 @@ import {
   syncCampaignLinks,
 } from "@/lib/campaigns/links";
 import { buildReportUrl, generateReportShareSlug } from "@/lib/reports/share";
+import { parseFlowForm } from "@/lib/flows/templates";
+import { Prisma } from "@/app/generated/prisma/client";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -37,6 +39,8 @@ const createAutomationSchema = z
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
     dmMessage: z.string().min(1).max(1000),
+    // A multi-step flow form (lib/flows/templates.ts); null/absent = classic DM.
+    flow: z.unknown().optional().nullable(),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
     openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -101,6 +105,7 @@ const updateAutomationSchema = z.object({
   matchAnyWord: z.boolean().optional(),
   dmTriggerEnabled: z.boolean().optional(),
   dmMessage: z.string().min(1).max(1000).optional(),
+  flow: z.unknown().optional().nullable(),
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
   openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -372,8 +377,14 @@ export async function POST(request: NextRequest) {
     .map((m) => m.trim())
     .filter(Boolean);
 
+  const builtFlow = parsed.data.flow ? parseFlowForm(parsed.data.flow) : null;
+  if (builtFlow && "error" in builtFlow) {
+    return NextResponse.json({ success: false, error: builtFlow.error }, { status: 400 });
+  }
+
   const automation = await prisma.automation.create({
     data: {
+      ...(builtFlow ? { flow: builtFlow.flow as Prisma.InputJsonValue } : {}),
       name: parsed.data.name,
       goal: parsed.data.goal,
       // A next-reel campaign has no post yet; the cron binds it once a reel is posted.
@@ -489,8 +500,19 @@ export async function PATCH(request: NextRequest) {
     trackedDestinationUrl,
     secondaryDestinationUrl,
     secondaryButtonLabel,
+    flow: flowInput,
     ...automationData
   } = parsed.data;
+
+  // undefined keeps the flow, null removes it, a form replaces it.
+  const builtFlow = flowInput ? parseFlowForm(flowInput) : null;
+  if (builtFlow && "error" in builtFlow) {
+    return NextResponse.json({ success: false, error: builtFlow.error }, { status: 400 });
+  }
+  const flowData =
+    flowInput === undefined
+      ? {}
+      : { flow: builtFlow ? (builtFlow.flow as Prisma.InputJsonValue) : Prisma.DbNull };
 
   // Moving a campaign to another account: it must be one of this workspace's.
   if (
@@ -548,7 +570,7 @@ export async function PATCH(request: NextRequest) {
   const updated = await prisma.$transaction(async (tx) => {
     const campaign = await tx.automation.update({
       where: { id: automationId },
-      data: automationData,
+      data: { ...automationData, ...flowData },
     });
 
     await syncCampaignLinks(tx, {

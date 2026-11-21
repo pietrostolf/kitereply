@@ -155,8 +155,8 @@ export async function buildMessage(
           buttons: await Promise.all(
             list.map(async (b, i) =>
               b.url
-                ? { type: "web_url", title: b.title.slice(0, 20), url: await trackedUrl(automation, b.url, userId) }
-                : { type: "postback", title: b.title.slice(0, 20), payload: payload(i) }
+                ? { type: "web_url", title: cut(b.title, 20), url: await trackedUrl(automation, b.url, userId) }
+                : { type: "postback", title: cut(b.title, 20), payload: payload(i) }
             )
           ),
         },
@@ -165,8 +165,8 @@ export async function buildMessage(
   }
   const quick = list
     .slice(0, skipLabel ? 12 : 13)
-    .map((b, i) => ({ content_type: "text", title: b.title.slice(0, 20), payload: payload(i) }));
-  if (skipLabel) quick.push({ content_type: "text", title: skipLabel.slice(0, 20), payload: payload("skip") });
+    .map((b, i) => ({ content_type: "text", title: cut(b.title, 20), payload: payload(i) }));
+  if (skipLabel) quick.push({ content_type: "text", title: cut(skipLabel, 20), payload: payload("skip") });
   return quick.length ? { text: text.slice(0, 1000), quick_replies: quick } : { text: text.slice(0, 1000) };
 }
 
@@ -393,6 +393,11 @@ export async function sendFlowReminder(automationId: string, stepId: string, use
   });
   const message = await buildMessage(automation, `${stepId}${REMINDER_SUFFIX}`, render(step.reminder.text, contact?.username), step.reminder.buttons, userId);
   await sendOnce(context, automation, { userId }, opId, `${stepId}${REMINDER_SUFFIX}`, message);
+}
+
+/** Truncate by characters, not UTF-16 units, so an emoji is never split in half. */
+function cut(text: string, max: number) {
+  return [...text].slice(0, max).join("");
 }
 
 function render(text: string, username?: string | null) {
