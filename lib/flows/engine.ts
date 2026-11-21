@@ -261,6 +261,12 @@ export async function runStep(args: RunArgs): Promise<void> {
       ((await redis.get(giftKey)) as GiftResult | null) ??
       (contact.email ? await claimGift(step.gift, contact.email, contact.username) : "error");
     if (result !== "error") await redis.set(giftKey, result, "EX", SENT_TTL_SECONDS);
+    if (result === "ended") {
+      await sendOnce(context, automation, recipient, opId, `${step.id}:ended`, {
+        text: "Poxa, esse presente era por tempo limitado e já encerrou 😕 Mas fica de olho que sempre tem novidade por aqui! 🎒",
+      });
+      return;
+    }
     if (result === "error") {
       // Never tell someone to check their email when no invite went out.
       await prisma.operationalEvent.create({
@@ -425,7 +431,7 @@ function toMetaRecipient(r: Recipient) {
   return "commentId" in r ? { comment_id: r.commentId } : { id: r.userId };
 }
 
-type GiftResult = "invited" | "existing" | "error";
+type GiftResult = "invited" | "existing" | "ended" | "error";
 
 /**
  * Ask the community platform to invite the email to a promotion.
@@ -441,10 +447,13 @@ async function claimGift(promo: string, email: string, instagram: string | null)
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
       body: JSON.stringify({ promo, email, instagram }),
-      signal: AbortSignal.timeout(15_000),
+      // The platform answers in a few seconds; a short timeout would report a gift that did go out as failed.
+      signal: AbortSignal.timeout(25_000),
     });
     const data = (await res.json()) as { result?: string };
-    return data.result === "existing" ? "existing" : res.ok ? "invited" : "error";
+    if (data.result === "existing" || data.result === "ended") return data.result;
+    // "limit" (anti-abuse caps) and failures go to a human, like any other error.
+    return res.ok && data.result === "invited" ? "invited" : "error";
   } catch {
     return "error";
   }

@@ -240,3 +240,20 @@ describe("audit 2 fixes", () => {
     expect(msg.attachment.payload.buttons[0].title).toBe("Moro no Brasil hoj 🇧🇷");
   });
 });
+
+describe("gift results", () => {
+  it("tells people a finished promo ended, without alerting Mari", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({ result: "ended" }) })));
+    db.contact.upsert.mockResolvedValue({ id: "c1", email: "ana@x.com", tags: [] });
+    await run("s3");
+    expect(sentTexts()).toContain("já encerrou");
+    expect(db.operationalEvent.create).not.toHaveBeenCalled();
+  });
+  it("treats the anti-abuse limit as an error for a human", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({ result: "limit" }) })));
+    db.contact.upsert.mockResolvedValue({ id: "c1", email: "ana@x.com", tags: [] });
+    await run("s3");
+    expect(db.operationalEvent.create).toHaveBeenCalled();
+    expect(sentTexts()).not.toContain("Cheque seu e-mail");
+  });
+});
