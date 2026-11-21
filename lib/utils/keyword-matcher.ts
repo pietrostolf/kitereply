@@ -181,16 +181,20 @@ export function matchKeywords(
     stripSpecialCharacters(normalizeArabicScript(commentText))
   ).toLowerCase();
 
-  if (!cleanedText) {
-    return { matched: false, matchedKeyword: null };
-  }
-
   for (const keyword of keywords) {
     const cleanedKeyword = foldDiacritics(
       stripSpecialCharacters(normalizeArabicScript(keyword))
     ).toLowerCase();
 
-    if (!cleanedKeyword) continue;
+    if (!cleanedKeyword) {
+      // Emoji-only keyword ("🎁"): stripping empties it, so look for the emoji itself.
+      const emoji = keyword.replace(/[\s\u{FE0F}]/gu, "");
+      if (emoji && commentText.replace(/\u{FE0F}/gu, "").includes(emoji)) {
+        return { matched: true, matchedKeyword: keyword };
+      }
+      continue;
+    }
+    if (!cleanedText) continue;
 
     // Only numeric-like keywords get the O/0 fold — a word keyword compares
     // exactly as before.

@@ -86,6 +86,7 @@ model Workspace {
   webhookEvents     WebhookEvent[]
   operationalEvents OperationalEvent[]
   serviceKeys       ServiceKey[]
+  contacts          Contact[]
 
   @@index([ownerId])
 }
@@ -225,6 +226,9 @@ model Automation {
   wholeWordMatch Boolean @default(true)
   reportShareSlug    String? @unique
   reportShareEnabled Boolean @default(true)
+  /// Multi-step DM flow (lib/flows/engine.ts). When set, a matching comment
+  /// starts the flow instead of the fixed opening/link DM.
+  flow           Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -444,4 +448,25 @@ model ZernioConnection {
 model PostbackDelivery {
   id String @id
   createdAt DateTime @default(now())
+}
+
+/// A person who talked to a connected account: what flows learned about them.
+model Contact {
+  id          String    @id @default(cuid())
+  workspaceId String
+  /// Instagram-scoped id of the person (the commenter / DM sender id).
+  igsid       String
+  username    String?
+  email       String?
+  phone       String?
+  tags        String[]  @default([])
+  /// When they gave an email after being told they would receive content.
+  consentAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, igsid])
+  @@index([workspaceId, email])
 }

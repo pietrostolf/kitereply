@@ -15,6 +15,8 @@ import {
   syncCampaignLinks,
 } from "@/lib/campaigns/links";
 import { buildReportUrl, generateReportShareSlug } from "@/lib/reports/share";
+import { parseFlowForm } from "@/lib/flows/templates";
+import { Prisma } from "@/app/generated/prisma/client";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -23,6 +25,21 @@ import {
 // This list is read-your-writes (created/imported campaigns must show up
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
+
+// A flow replaces the classic opening/follow/follow-up DMs, and the DM keyword
+// trigger only knows the classic reveal; stale values must not keep running.
+const FLOW_OVERRIDES = {
+  dmTriggerEnabled: false,
+  openingDmEnabled: false,
+  openingDmMessage: null,
+  openingDmButtonLabel: null,
+  requireFollow: false,
+  followPromptMessage: null,
+  followPromptButtonLabel: null,
+  followUpEnabled: false,
+  followUpMessage: null,
+  followUpDelayMinutes: 0,
+};
 
 const createAutomationSchema = z
   .object({
@@ -37,6 +54,8 @@ const createAutomationSchema = z
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
     dmMessage: z.string().min(1).max(1000),
+    // A multi-step flow form (lib/flows/templates.ts); null/absent = classic DM.
+    flow: z.unknown().optional().nullable(),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
     openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -101,6 +120,7 @@ const updateAutomationSchema = z.object({
   matchAnyWord: z.boolean().optional(),
   dmTriggerEnabled: z.boolean().optional(),
   dmMessage: z.string().min(1).max(1000).optional(),
+  flow: z.unknown().optional().nullable(),
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
   openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -372,6 +392,11 @@ export async function POST(request: NextRequest) {
     .map((m) => m.trim())
     .filter(Boolean);
 
+  const builtFlow = parsed.data.flow ? parseFlowForm(parsed.data.flow) : null;
+  if (builtFlow && "error" in builtFlow) {
+    return NextResponse.json({ success: false, error: builtFlow.error }, { status: 400 });
+  }
+
   const automation = await prisma.automation.create({
     data: {
       name: parsed.data.name,
@@ -418,6 +443,7 @@ export async function POST(request: NextRequest) {
       wholeWordMatch: parsed.data.wholeWordMatch,
       workspaceId,
       instagramAccountId: instagramAccount.id,
+      ...(builtFlow ? { flow: builtFlow.flow as Prisma.InputJsonValue, ...FLOW_OVERRIDES } : {}),
       reportShareSlug: generateReportShareSlug(),
       ...(linkCreates.length > 0
         ? { trackedLinks: { create: linkCreates } }
@@ -489,8 +515,21 @@ export async function PATCH(request: NextRequest) {
     trackedDestinationUrl,
     secondaryDestinationUrl,
     secondaryButtonLabel,
+    flow: flowInput,
     ...automationData
   } = parsed.data;
+
+  // undefined keeps the flow, null removes it, a form replaces it.
+  const builtFlow = flowInput ? parseFlowForm(flowInput) : null;
+  if (builtFlow && "error" in builtFlow) {
+    return NextResponse.json({ success: false, error: builtFlow.error }, { status: 400 });
+  }
+  const flowData =
+    flowInput === undefined
+      ? {}
+      : builtFlow
+        ? { flow: builtFlow.flow as Prisma.InputJsonValue, ...FLOW_OVERRIDES }
+        : { flow: Prisma.DbNull };
 
   // Moving a campaign to another account: it must be one of this workspace's.
   if (
@@ -548,7 +587,7 @@ export async function PATCH(request: NextRequest) {
   const updated = await prisma.$transaction(async (tx) => {
     const campaign = await tx.automation.update({
       where: { id: automationId },
-      data: automationData,
+      data: { ...automationData, ...flowData },
     });
 
     await syncCampaignLinks(tx, {

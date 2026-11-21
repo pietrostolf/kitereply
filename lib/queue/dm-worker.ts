@@ -13,13 +13,16 @@ import {
   MESSAGE_JOB_NAME,
   POSTBACK_JOB_NAME,
   FOLLOWUP_JOB_NAME,
+  FLOW_REMINDER_JOB_NAME,
   type DmQueueJob,
+  type ProcessFlowReminderJob,
   type ProcessCommentJob,
   type ProcessMessageJob,
   type ProcessPostbackJob,
   type ProcessFollowUpJob,
 } from "./client";
 import { prisma } from "@/lib/db/client";
+import { getFlow, handleFlowAnswer, handleFlowPayload, isWithHuman, runStep, sendFlowReminder } from "@/lib/flows/engine";
 import {
   MetaApiError,
   RateLimitError,
@@ -664,7 +667,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     }
     let delivered = false;
     try {
-      if (useOpeningDm) {
+      const flow = getFlow(automation);
+      if (flow) {
+        await runStep({
+          context: accessToken,
+          automation,
+          recipient: { commentId },
+          userId: commenterId,
+          username: commenterName,
+          stepId: flow.start,
+          opId: `comment:${commentId}`,
+        });
+      } else if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
           message: automation.openingDmMessage as string,
           commenterName,
@@ -888,6 +902,7 @@ async function sendFollowRecheckAck({
  */
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
+  if (await handleFlowPayload(userId, payload, instagramAccountId, `postback:${job.data.mid ?? job.id}`)) return;
 
   const isFollowCheck = payload.startsWith("followcheck:");
   if (!isFollowCheck && !payload.startsWith("reveal:")) return;
@@ -1279,6 +1294,11 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
  */
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const { instagramAccountId, messageId, messageText, senderId } = job.data;
+  // A flow's quick-reply tap or typed answer must not fall through to keyword campaigns.
+  const opId = `message:${messageId}`;
+  if (job.data.quickReplyPayload && (await handleFlowPayload(senderId, job.data.quickReplyPayload, instagramAccountId, opId))) return;
+  if (await handleFlowAnswer(senderId, instagramAccountId, messageText, opId)) return;
+  if (await isWithHuman(instagramAccountId, senderId)) return; // Mari is answering this person
 
   const automations = await prisma.automation.findMany({
     where: {
@@ -1543,6 +1563,10 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   }
   if (job.name === MESSAGE_JOB_NAME) {
     return processMessage(job as Job<ProcessMessageJob>);
+  }
+  if (job.name === FLOW_REMINDER_JOB_NAME) {
+    const { automationId, stepId, userId } = job.data as ProcessFlowReminderJob;
+    return sendFlowReminder(automationId, stepId, userId, `reminder:${job.id}`);
   }
   return processComment(job as Job<ProcessCommentJob>);
 }

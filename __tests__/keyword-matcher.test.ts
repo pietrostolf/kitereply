@@ -201,6 +201,13 @@ describe("matchKeywords — edge cases", () => {
     expect(result.matched).toBe(false);
   });
 
+  it("should match an emoji-only keyword", () => {
+    expect(matchKeywords("🎁", ["presente", "🎁"], true)).toEqual({ matched: true, matchedKeyword: "🎁" });
+    expect(matchKeywords("quero 🎁🎁", ["🎁"], true).matched).toBe(true);
+    expect(matchKeywords("❤️", ["❤"], true).matched).toBe(true); // with or without the variation selector
+    expect(matchKeywords("🔥🔥", ["🎁"], true).matched).toBe(false);
+  });
+
   it("should match keyword even with surrounding emojis", () => {
     const result = matchKeywords("🔥 LINK 🔥", ["link"], true);
     expect(result.matched).toBe(true);

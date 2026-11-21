@@ -75,17 +75,29 @@ export interface ProcessMessageJob {
   messageId: string;
   messageText: string;
   senderId: string;
+  quickReplyPayload?: string;
+}
+
+// Delayed reminder of a flow step, sent only if its link was not clicked.
+export interface ProcessFlowReminderJob {
+  accountConnectionId?: string;
+  instagramAccountId: string;
+  userId: string;
+  automationId: string;
+  stepId: string;
 }
 
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
-  | ProcessMessageJob;
+  | ProcessMessageJob
+  | ProcessFlowReminderJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
+export const FLOW_REMINDER_JOB_NAME = "process-flow-reminder";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 

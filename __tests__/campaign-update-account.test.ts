@@ -93,3 +93,41 @@ describe("PATCH /api/automations", () => {
     expect(mockPrisma.instagramAccount.findFirst).not.toHaveBeenCalled();
   });
 });
+
+
+describe("PATCH /api/automations — flows", () => {
+  const form = {
+    template: "choices",
+    opening: "Mora no Brasil?",
+    options: [
+      { key: "a", label: "Sim", reply: "Ok" },
+      { key: "b", label: "Não", reply: "Ok" },
+    ],
+  };
+  const updateData = () => mockPrisma.automation.update.mock.calls[0][0].data;
+
+  it("keeps the flow when the field is absent", async () => {
+    await PATCH(patchRequest({ isActive: false }));
+    expect(updateData()).not.toHaveProperty("flow");
+  });
+
+  it("removes the flow with null", async () => {
+    const { Prisma } = await import("../app/generated/prisma/client");
+    await PATCH(patchRequest({ flow: null }));
+    expect(updateData().flow).toBe(Prisma.DbNull);
+  });
+
+  it("stores the built flow and turns the classic DM features off", async () => {
+    await PATCH(patchRequest({ flow: form, requireFollow: true, dmTriggerEnabled: true }));
+    const data = updateData();
+    expect(data.flow.steps.map((s: { id: string }) => s.id)).toContain("option_a");
+    expect(data).toMatchObject({ requireFollow: false, dmTriggerEnabled: false, openingDmEnabled: false, followUpEnabled: false });
+  });
+
+  it("rejects an invalid form with a readable message", async () => {
+    const response = await PATCH(patchRequest({ flow: { ...form, opening: "" } }));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("Primeira DM: está vazio.");
+    expect(mockPrisma.automation.update).not.toHaveBeenCalled();
+  });
+});
