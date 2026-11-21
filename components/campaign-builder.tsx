@@ -18,7 +18,7 @@ import { useRouter } from "next/navigation";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import PostPicker from "@/components/post-picker";
 import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
-import FlowFormEditor from "@/components/flow-form";
+import FlowFormEditor, { FlowPreview } from "@/components/flow-form";
 import type { FlowFormInput } from "@/lib/flows/templates";
 import { readCache, writeCache } from "@/lib/client-cache";
 import {
@@ -342,6 +342,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
     setMatchMode("specific");
     setKeywordText((row.keywords ?? []).join(", "));
     setDmMessage(row.dmMessage ?? "");
+    setFlowForm(null); // CSV rows are link campaigns
     setPublicReplyEnabled(Boolean(row.publicReply));
     setPublicReplyMessages(row.publicReply ? [row.publicReply] : [""]);
     const hasOpening = Boolean(row.openingDmMessage);
@@ -749,6 +750,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
           >
             {t("any word")}
           </Radio>
+          {!flowForm && (<>
           <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
             <span className="text-sm text-foreground">
               {t("also reply when someone DMs")}{" "}
@@ -766,6 +768,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
                 : t("A DM containing any of these words gets the same reply, no comment needed.")}
             </p>
           )}
+          </>)}
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
             <span className="text-sm text-foreground">
               {t("reply to their comments under the post")}
@@ -1014,7 +1017,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       <div>
         <p className="mb-4 text-sm text-muted">{t("Preview")}</p>
         <div className="flex min-w-0 justify-center lg:sticky lg:top-6 lg:block">
-          <CampaignPreview
+          {flowForm ? <FlowPreview form={flowForm} /> : <CampaignPreview
             tab={previewTab}
             onTabChange={setPreviewTab}
             username={username}
@@ -1042,7 +1045,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
             followUpEnabled={followUpEnabled}
             followUpMessage={followUpMessage}
             followUpDelayMinutes={followUpDelayMinutes}
-          />
+          />}
         </div>
       </div>
       </div>

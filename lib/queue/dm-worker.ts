@@ -22,7 +22,7 @@ import {
   type ProcessFollowUpJob,
 } from "./client";
 import { prisma } from "@/lib/db/client";
-import { getFlow, handleFlowAnswer, handleFlowPayload, runStep, sendFlowReminder } from "@/lib/flows/engine";
+import { getFlow, handleFlowAnswer, handleFlowPayload, isWithHuman, runStep, sendFlowReminder } from "@/lib/flows/engine";
 import {
   MetaApiError,
   RateLimitError,
@@ -1298,6 +1298,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const opId = `message:${messageId}`;
   if (job.data.quickReplyPayload && (await handleFlowPayload(senderId, job.data.quickReplyPayload, instagramAccountId, opId))) return;
   if (await handleFlowAnswer(senderId, instagramAccountId, messageText, opId)) return;
+  if (await isWithHuman(instagramAccountId, senderId)) return; // Mari is answering this person
 
   const automations = await prisma.automation.findMany({
     where: {

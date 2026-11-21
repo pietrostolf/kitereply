@@ -26,6 +26,21 @@ import {
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
 
+// A flow replaces the classic opening/follow/follow-up DMs, and the DM keyword
+// trigger only knows the classic reveal; stale values must not keep running.
+const FLOW_OVERRIDES = {
+  dmTriggerEnabled: false,
+  openingDmEnabled: false,
+  openingDmMessage: null,
+  openingDmButtonLabel: null,
+  requireFollow: false,
+  followPromptMessage: null,
+  followPromptButtonLabel: null,
+  followUpEnabled: false,
+  followUpMessage: null,
+  followUpDelayMinutes: 0,
+};
+
 const createAutomationSchema = z
   .object({
     name: z.string().min(1).max(100),
@@ -384,7 +399,6 @@ export async function POST(request: NextRequest) {
 
   const automation = await prisma.automation.create({
     data: {
-      ...(builtFlow ? { flow: builtFlow.flow as Prisma.InputJsonValue } : {}),
       name: parsed.data.name,
       goal: parsed.data.goal,
       // A next-reel campaign has no post yet; the cron binds it once a reel is posted.
@@ -429,6 +443,7 @@ export async function POST(request: NextRequest) {
       wholeWordMatch: parsed.data.wholeWordMatch,
       workspaceId,
       instagramAccountId: instagramAccount.id,
+      ...(builtFlow ? { flow: builtFlow.flow as Prisma.InputJsonValue, ...FLOW_OVERRIDES } : {}),
       reportShareSlug: generateReportShareSlug(),
       ...(linkCreates.length > 0
         ? { trackedLinks: { create: linkCreates } }
@@ -512,7 +527,9 @@ export async function PATCH(request: NextRequest) {
   const flowData =
     flowInput === undefined
       ? {}
-      : { flow: builtFlow ? (builtFlow.flow as Prisma.InputJsonValue) : Prisma.DbNull };
+      : builtFlow
+        ? { flow: builtFlow.flow as Prisma.InputJsonValue, ...FLOW_OVERRIDES }
+        : { flow: Prisma.DbNull };
 
   // Moving a campaign to another account: it must be one of this workspace's.
   if (

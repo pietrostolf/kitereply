@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/client";
 import { RateLimitError, sendMessage } from "@/lib/meta/client";
 import { createInstagramContext, type InstagramContext } from "@/lib/instagram/context";
 import { getDMQueue, getRedisConnection, FLOW_REMINDER_JOB_NAME } from "@/lib/queue/client";
+import { graphemes } from "@/lib/flows/templates";
 import { FLOW_LINK_POSITION } from "@/lib/tracking/link-order";
 import { buildTrackedUrl } from "@/lib/tracking/message";
 import { generateTrackedLinkSlug, hashRecipientId } from "@/lib/tracking/server";
@@ -52,6 +53,8 @@ export type FlowStep = {
   /** Sent `hours` later (max 23, inside Meta's 24h window) only if no link of
    *  this flow was clicked. */
   reminder?: { hours: number; text: string; buttons?: FlowButton[] };
+  /** Hands the conversation to a human: DM automations stay quiet for 24h. */
+  handoff?: boolean;
 };
 
 export type Flow = { start: string; steps: FlowStep[] };
@@ -71,6 +74,12 @@ const WAIT_TTL_SECONDS = 24 * 60 * 60; // Meta's messaging window
 const SENT_TTL_SECONDS = 7 * 24 * 60 * 60; // longer than any job retry
 const REMINDER_SUFFIX = "~r";
 const waitKey = (igId: string, userId: string) => `flow_wait:${igId}:${userId}`;
+const humanKey = (igId: string, userId: string) => `flow_human:${igId}:${userId}`;
+
+/** True while a person asked to talk to a human (other DM automations stay quiet). */
+export async function isWithHuman(igId: string, userId: string) {
+  return (await getRedisConnection().exists(humanKey(igId, userId))) > 0;
+}
 const opHash = (opId: string) => createHash("sha256").update(opId).digest("hex").slice(0, 24);
 
 export function getFlow(automation: { flow: unknown }): Flow | null {
@@ -288,6 +297,11 @@ export async function runStep(args: RunArgs): Promise<void> {
       )
     );
   }
+  if (step.handoff) {
+    await sideEffect(automation, "pausar as automações para a conversa humana", () =>
+      getRedisConnection().set(humanKey(igId, userId), "1", "EX", WAIT_TTL_SECONDS)
+    );
+  }
   if (step.reminder && sentNow) {
     const hours = Math.min(step.reminder.hours, 23);
     await sideEffect(automation, "agendar o lembrete", () =>
@@ -388,6 +402,9 @@ export async function sendFlowReminder(automationId: string, stepId: string, use
     where: { automationId, recipientHash: hashRecipientId(userId) },
   });
   if (clicked > 0) return;
+  // Several steps of one flow can schedule a reminder; a person gets at most one a day.
+  const once = await getRedisConnection().set(`flow_reminded:${automationId}:${userId}`, "1", "EX", WAIT_TTL_SECONDS, "NX");
+  if (!once) return;
   const contact = await prisma.contact.findUnique({
     where: { workspaceId_igsid: { workspaceId: automation.workspaceId, igsid: userId } },
   });
@@ -395,9 +412,9 @@ export async function sendFlowReminder(automationId: string, stepId: string, use
   await sendOnce(context, automation, { userId }, opId, `${stepId}${REMINDER_SUFFIX}`, message);
 }
 
-/** Truncate by characters, not UTF-16 units, so an emoji is never split in half. */
+/** Truncate by visible characters, so an emoji (even a flag) is never split. */
 function cut(text: string, max: number) {
-  return [...text].slice(0, max).join("");
+  return graphemes(text).slice(0, max).join("");
 }
 
 function render(text: string, username?: string | null) {

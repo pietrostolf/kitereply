@@ -127,6 +127,7 @@ vi.mock("@/lib/flows/engine", () => ({
   getFlow: vi.fn(() => null),
   handleFlowAnswer: vi.fn(async () => false),
   handleFlowPayload: vi.fn(async () => false),
+  isWithHuman: vi.fn(async () => false),
   runStep: vi.fn(async () => undefined),
   sendFlowReminder: vi.fn(),
 }));

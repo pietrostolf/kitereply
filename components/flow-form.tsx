@@ -19,7 +19,8 @@ const field =
   "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-zinc-500 focus:border-accent/40 focus:outline-none";
 const box = "rounded-lg border border-border p-3 space-y-2";
 
-const emptyOption = (): Option => ({ label: "", reply: "", tags: [], links: [], human: false });
+// `key` keeps an option's step id stable when other options are edited or removed.
+const emptyOption = (): Option => ({ key: Math.random().toString(36).slice(2, 10), label: "", reply: "", tags: [], links: [], human: false });
 
 export const newFlowForm = (template: "choices" | "gift"): FlowFormInput =>
   template === "choices"
@@ -82,7 +83,7 @@ function ChoicesEditor({ form, onChange }: { form: ChoicesForm; onChange: (f: Ch
     <div className="space-y-3">
       <Text value={form.opening} onChange={(opening) => onChange({ ...form, opening })} placeholder="Primeira DM (ex.: Você já mora fora ou ainda mora no Brasil?)" />
       {form.options.map((o, i) => (
-        <div key={i} className={box}>
+        <div key={o.key ?? i} className={box}>
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-muted">Opção {i + 1}</span>
             {form.options.length > 2 && (
@@ -106,7 +107,7 @@ function ChoicesEditor({ form, onChange }: { form: ChoicesForm; onChange: (f: Ch
           </label>
         </div>
       ))}
-      {form.options.length < 13 && (
+      {form.options.length < 3 && (
         <button type="button" onClick={() => onChange({ ...form, options: [...form.options, emptyOption()] })} className="text-xs font-medium text-accent hover:underline">
           + Outra opção
         </button>
@@ -218,6 +219,42 @@ export default function FlowFormEditor({ value, onChange }: { value: FlowFormInp
       {value?.template === "choices" && <ChoicesEditor form={value} onChange={onChange} />}
       {value?.template === "gift" && <GiftEditor form={value} onChange={onChange} />}
       {value && <p className="text-xs text-muted">{"{username}"} personaliza qualquer texto.</p>}
+    </div>
+  );
+}
+
+/** A plain list of the messages a flow sends, shown instead of the phone preview. */
+export function FlowPreview({ form }: { form: FlowFormInput }) {
+  const bubbles: Array<{ text: string; buttons: string[] }> =
+    form.template === "gift"
+      ? [
+          { text: form.opening, buttons: [form.openLabel] },
+          { text: form.emailText, buttons: [] },
+          ...(form.phoneText !== undefined ? [{ text: form.phoneText, buttons: [form.skipLabel ?? "Pular"] }] : []),
+          { text: form.invitedText, buttons: [] },
+          { text: `(quem já tem conta) ${form.existingText}`, buttons: [] },
+        ]
+      : [
+          { text: form.opening, buttons: form.options.map((o) => o.label) },
+          ...form.options.map((o) => ({
+            text: `(${o.label || "opção"}) ${o.reply}`,
+            buttons: [...(o.links ?? []).map((l) => l.label), ...(o.continueLabel ? [o.continueLabel] : []), ...(o.human ? ["Tenho uma dúvida"] : [])],
+          })),
+          ...(form.followUp ? [{ text: form.followUp.text, buttons: form.followUp.links.map((l) => l.label) }] : []),
+          ...(form.reminder ? [{ text: `(lembrete após ${form.reminder.hours}h) ${form.reminder.text}`, buttons: form.reminder.link ? [form.reminder.link.label] : [] }] : []),
+        ];
+  return (
+    <div className="w-full max-w-sm space-y-2">
+      {bubbles.map((b, i) => (
+        <div key={i} className="rounded-2xl border border-border bg-surface p-3 text-sm">
+          <p className="whitespace-pre-wrap text-foreground">{b.text || "…"}</p>
+          {b.buttons.filter(Boolean).map((t, j) => (
+            <div key={j} className="mt-2 rounded-lg border border-border px-2 py-1 text-center text-xs text-foreground">
+              {t}
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

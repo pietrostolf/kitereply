@@ -27,8 +27,8 @@ describe("parseFlowForm", () => {
       template: "choices",
       opening: "Mora no Brasil ou fora?",
       options: [
-        { label: "Moro no Brasil", tags: ["brasil"], reply: "Obrigada!", continueLabel: "Quero saber mais", human: true },
-        { label: "Já moro fora", reply: "Obrigada!", links: [{ label: "Conhecer", url: "https://site/x" }] },
+        { key: "br", label: "Moro no Brasil", tags: ["brasil"], reply: "Obrigada!", continueLabel: "Quero saber mais", human: true },
+        { key: "fora", label: "Já moro fora", reply: "Obrigada!", links: [{ label: "Conhecer", url: "https://site/x" }] },
       ],
       followUp: { text: "Anexei o PDF", links: [{ label: "Baixar PDF", url: "https://site/x.pdf" }, { label: "Aplicar", url: "https://site/a" }] },
       reminder: { hours: 20, text: "Passando aqui" },
@@ -36,9 +36,9 @@ describe("parseFlowForm", () => {
     if (!("flow" in result)) throw new Error(result.error);
     const byId = Object.fromEntries(result.flow.steps.map((s) => [s.id, s]));
     expect(byId.open.buttons).toHaveLength(2);
-    expect(byId.option0.buttons?.map((b) => b.next)).toEqual(["followup", "human"]);
-    expect(byId.option0.reminder).toBeUndefined(); // no link on this reply
-    expect(byId.option1.reminder?.hours).toBe(20);
+    expect(byId.option_br.buttons?.map((b) => b.next)).toEqual(["followup", "human"]);
+    expect(byId.option_br.reminder).toBeUndefined(); // no link on this reply
+    expect(byId.option_fora.reminder?.hours).toBe(20);
     expect(byId.followup.buttons).toHaveLength(2);
     // Every `next` points at a real step.
     const ids = new Set(result.flow.steps.map((s) => s.id));
@@ -56,6 +56,12 @@ describe("parseFlowForm", () => {
       followUp: { text: "f", links: [{ label: "x", url: "https://x" }] },
     });
     expect("error" in tooMany && tooMany.error).toMatch(/3 botões/);
+    const four = parseFlowForm({ template: "choices", opening: "x", options: ["A", "B", "C", "D"].map((label) => ({ label, reply: "r" })) });
+    expect("error" in four && four.error).toMatch(/Opções: passou do limite \(máx. 3\)/);
+    const empty = parseFlowForm({ template: "choices", opening: "x", options: [{ label: "A", reply: "r" }, { label: "B", reply: "" }] });
+    expect("error" in empty && empty.error).toBe("Opção 2 → resposta: está vazio.");
+    const long = parseFlowForm({ template: "choices", opening: "x".repeat(641), options: [{ label: "A", reply: "r" }, { label: "B", reply: "r" }] });
+    expect("error" in long && long.error).toMatch(/Primeira DM: passou do limite \(máx. 640\)/);
     const badSlug = parseFlowForm({ template: "gift", opening: "x", openLabel: "x", emailText: "x", promo: "Dia Do Designer", invitedText: "x", existingText: "x" });
     expect("error" in badSlug).toBe(true);
   });

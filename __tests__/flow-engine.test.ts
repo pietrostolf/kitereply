@@ -12,7 +12,11 @@ const { sendMessage, redis, queueAdd, db, slot, usage } = vi.hoisted(() => {
       store,
       get: vi.fn(async (k: string) => store.get(k) ?? null),
       exists: vi.fn(async (k: string) => (store.has(k) ? 1 : 0)),
-      set: vi.fn(async (k: string, v: string) => void store.set(k, v)),
+      set: vi.fn(async (k: string, v: string, ...opts: unknown[]) => {
+        if (opts.includes("NX") && store.has(k)) return null;
+        store.set(k, v);
+        return "OK";
+      }),
       del: vi.fn(async (k: string) => void store.delete(k)),
     },
     db: {
@@ -42,6 +46,7 @@ vi.mock("@/lib/instagram/context", () => ({
 }));
 
 import {
+  isWithHuman,
   buildMessage,
   handleFlowAnswer,
   handleFlowPayload,
@@ -59,6 +64,7 @@ const flow: Flow = {
     { id: "s3", text: "", gift: "dia-do-designer", next: "s4", existing: "s5" },
     { id: "s4", text: "Cheque seu e-mail!" },
     { id: "s5", text: "Você já tem conta!" },
+    { id: "human", text: "Pode mandar aqui", handoff: true },
     {
       id: "link",
       text: "Veja",
@@ -96,7 +102,7 @@ describe("normalizeAnswer", () => {
 
 describe("buildMessage", () => {
   it("uses a button template with tracked links for up to 3 buttons", async () => {
-    const msg = (await buildMessage(automation, "link", "Veja", flow.steps[5].buttons, "u1")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const msg = (await buildMessage(automation, "link", "Veja", flow.steps.find((x) => x.id === "link")!.buttons, "u1")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     expect(msg.attachment.payload.buttons[0]).toMatchObject({ type: "web_url" });
     expect(msg.attachment.payload.buttons[0].url).toContain("/r/abc?r=");
   });
@@ -214,5 +220,23 @@ describe("sendFlowReminder", () => {
     db.linkClick.count.mockResolvedValue(0);
     await sendFlowReminder("a1", "link", "u1", "r1");
     expect(sentTexts()).toContain("flow:a1:link~r:0");
+  });
+});
+
+describe("audit 2 fixes", () => {
+  it("pauses DM automations after a handoff to a human", async () => {
+    expect(await isWithHuman("ig1", "u1")).toBe(false);
+    await run("human");
+    expect(await isWithHuman("ig1", "u1")).toBe(true);
+  });
+  it("sends at most one reminder a day per flow and person", async () => {
+    db.linkClick.count.mockResolvedValue(0);
+    await sendFlowReminder("a1", "link", "u1", "r1");
+    await sendFlowReminder("a1", "link", "u1", "r2");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+  it("never splits a flag emoji when cutting a button title", async () => {
+    const msg = (await buildMessage(automation, "s1", "x", [{ title: "Moro no Brasil hoj 🇧🇷 sim", next: "s2" }], "u1")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(msg.attachment.payload.buttons[0].title).toBe("Moro no Brasil hoj 🇧🇷");
   });
 });
