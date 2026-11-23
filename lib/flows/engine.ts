@@ -3,7 +3,7 @@ import { reserveWorkspaceDMSend } from "@/lib/billing/usage";
 import { prisma } from "@/lib/db/client";
 import { RateLimitError, sendMessage } from "@/lib/meta/client";
 import { createInstagramContext, type InstagramContext } from "@/lib/instagram/context";
-import { getDMQueue, getRedisConnection, FLOW_REMINDER_JOB_NAME } from "@/lib/queue/client";
+import { getDMQueue, getRedisConnection, FLOW_REMINDER_JOB_NAME, GIFT_RETRY_JOB_NAME } from "@/lib/queue/client";
 import { graphemes } from "@/lib/flows/templates";
 import { FLOW_LINK_POSITION } from "@/lib/tracking/link-order";
 import { buildTrackedUrl } from "@/lib/tracking/message";
@@ -260,24 +260,17 @@ export async function runStep(args: RunArgs): Promise<void> {
     const result =
       ((await redis.get(giftKey)) as GiftResult | null) ??
       (contact.email ? await claimGift(step.gift, contact.email, contact.username) : "error");
-    if (result !== "error") await redis.set(giftKey, result, "EX", SENT_TTL_SECONDS);
+    if (result !== "error" && result !== "retry") await redis.set(giftKey, result, "EX", SENT_TTL_SECONDS);
     if (result === "ended") {
       await sendOnce(context, automation, recipient, opId, `${step.id}:ended`, {
         text: "Poxa, esse presente era por tempo limitado e já encerrou 😕 Mas fica de olho que sempre tem novidade por aqui! 🎒",
       });
       return;
     }
-    if (result === "error") {
+    if (result === "error" || result === "retry") {
       // Never tell someone to check their email when no invite went out.
-      await prisma.operationalEvent.create({
-        data: {
-          workspaceId: automation.workspaceId,
-          source: "WORKER",
-          level: "ERROR",
-          message: `Presente "${step.gift}" não enviado para @${contact.username ?? userId}: liberar à mão`,
-          payload: { automationId: automation.id, igsid: userId, email: contact.email },
-        },
-      });
+      if (result === "retry") await scheduleGiftRetry(automation, step.id, userId, 1, opId);
+      else await giftFailed(automation, step.gift, contact.username ?? userId, userId, contact.email);
       await sendOnce(context, automation, recipient, opId, `${step.id}:gifterr`, {
         text: "Recebi seu e-mail! 🎒 O presente vai chegar em algumas horas, tá? Se tiver qualquer dúvida, é só mandar aqui.",
       });
@@ -431,11 +424,16 @@ function toMetaRecipient(r: Recipient) {
   return "commentId" in r ? { comment_id: r.commentId } : { id: r.userId };
 }
 
-type GiftResult = "invited" | "existing" | "ended" | "error";
+type GiftResult = "invited" | "existing" | "ended" | "retry" | "error";
+
+/** Retries a held-back gift every 30 min for 3 h, well inside the 24 h messaging window. */
+const GIFT_RETRY_DELAY_MS = 30 * 60_000;
+const GIFT_MAX_ATTEMPTS = 6;
 
 /**
  * Ask the community platform to invite the email to a promotion.
- * Returns "invited", "existing" or "error". The endpoint is the platform's
+ * "retry" = it may work later (hourly cap, e-mail limit, outage); "error" = a
+ * human has to look (bad config, abuse cap). The endpoint is the platform's
  * gift function (GIFT_ENDPOINT_URL), authenticated with a shared secret.
  */
 async function claimGift(promo: string, email: string, instagram: string | null): Promise<GiftResult> {
@@ -450,11 +448,82 @@ async function claimGift(promo: string, email: string, instagram: string | null)
       // The platform answers in a few seconds; a short timeout would report a gift that did go out as failed.
       signal: AbortSignal.timeout(25_000),
     });
-    const data = (await res.json()) as { result?: string };
+    const data = (await res.json().catch(() => ({}))) as { result?: string };
     if (data.result === "existing" || data.result === "ended") return data.result;
-    // "limit" (anti-abuse caps) and failures go to a human, like any other error.
-    return res.ok && data.result === "invited" ? "invited" : "error";
+    if (res.ok && data.result === "invited") return "invited";
+    return [429, 502, 503, 504].includes(res.status) ? "retry" : "error";
   } catch {
-    return "error";
+    // Timeout or network: the invite may or may not have gone out; the platform skips a resend within 24 h.
+    return "retry";
   }
+}
+
+async function scheduleGiftRetry(automation: FlowAutomation, stepId: string, userId: string, attempt: number, opId: string) {
+  await getDMQueue().add(
+    GIFT_RETRY_JOB_NAME,
+    {
+      instagramAccountId: automation.instagramAccount.instagramId,
+      accountConnectionId: automation.instagramAccount.id,
+      userId,
+      automationId: automation.id,
+      stepId,
+      attempt,
+      opId,
+    },
+    { delay: GIFT_RETRY_DELAY_MS, jobId: `giftretry_${opHash(opId)}_${attempt}` }
+  );
+}
+
+/** Gives up on a gift: records it and e-mails the owner, who releases it by hand. */
+async function giftFailed(automation: FlowAutomation, promo: string, who: string, userId: string, email: string | null) {
+  const message = `Presente "${promo}" não enviado para @${who}: liberar à mão`;
+  await prisma.operationalEvent.create({
+    data: {
+      workspaceId: automation.workspaceId,
+      source: "WORKER",
+      level: "ERROR",
+      message,
+      payload: { automationId: automation.id, igsid: userId, email },
+    },
+  });
+  await notifyOwner(message, `${message}\nE-mail informado: ${email ?? "(nenhum)"}\nA pessoa recebeu "o presente vai chegar em algumas horas".`);
+}
+
+/** E-mail to ALERT_EMAIL through Resend; silent when not configured. */
+async function notifyOwner(subject: string, text: string) {
+  const to = process.env.ALERT_EMAIL;
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+  if (!to || !key || !from) return;
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, subject: `[KiteReply] ${subject}`, text }),
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => undefined);
+}
+
+/** Delayed job: try a held-back gift again and, once it goes out, send the step that follows it. */
+export async function retryGift(automationId: string, stepId: string, userId: string, attempt: number, opId: string) {
+  const automation = await prisma.automation.findFirst({ where: { id: automationId }, include: { instagramAccount: true } });
+  const step = automation && getFlow(automation)?.steps.find((s) => s.id === stepId);
+  if (!automation || !step?.gift) return;
+  const contact = await prisma.contact.findUnique({
+    where: { workspaceId_igsid: { workspaceId: automation.workspaceId, igsid: userId } },
+  });
+  const result = contact?.email ? await claimGift(step.gift, contact.email, contact.username) : "error";
+  if (result === "retry" && attempt < GIFT_MAX_ATTEMPTS) return scheduleGiftRetry(automation, stepId, userId, attempt + 1, opId);
+  if (result === "retry" || result === "error") return giftFailed(automation, step.gift, contact?.username ?? userId, userId, contact?.email ?? null);
+
+  const context = await createInstagramContext(automation.instagramAccount);
+  if (context.provider !== "META") return;
+  const retryOp = `${opId}:giftretry`;
+  if (result === "ended") {
+    await sendOnce(context, automation, { userId }, retryOp, `${step.id}:ended`, {
+      text: "Poxa, esse presente era por tempo limitado e já encerrou 😕 Mas fica de olho que sempre tem novidade por aqui! 🎒",
+    });
+    return;
+  }
+  const nextId = result === "existing" ? step.existing ?? step.next : step.next;
+  if (nextId) await runStep({ context, automation, recipient: { userId }, userId, username: contact?.username, stepId: nextId, opId: retryOp });
 }

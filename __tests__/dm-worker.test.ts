@@ -120,6 +120,7 @@ vi.mock("@/lib/queue/client", () => ({
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
   FLOW_REMINDER_JOB_NAME: "process-flow-reminder",
+  GIFT_RETRY_JOB_NAME: "process-gift-retry",
 }));
 
 // Flows have their own tests (flow-engine.test.ts); here campaigns have no flow.
@@ -130,6 +131,7 @@ vi.mock("@/lib/flows/engine", () => ({
   isWithHuman: vi.fn(async () => false),
   runStep: vi.fn(async () => undefined),
   sendFlowReminder: vi.fn(),
+  retryGift: vi.fn(),
 }));
 
 vi.mock("bullmq", () => {

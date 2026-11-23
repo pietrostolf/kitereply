@@ -43,10 +43,20 @@ import { matchKeywords } from "@/lib/utils/keyword-matcher";
 
 // Only consider comments from the last few days — older ones are outside
 // Instagram's private-reply window anyway, so a DM to them would just fail.
-const LOOKBACK_HOURS = Number(process.env.COMMENT_POLL_LOOKBACK_HOURS ?? 72);
+const LOOKBACK_HOURS = positiveNumberEnv("COMMENT_POLL_LOOKBACK_HOURS", 72);
 // Hard cap on how many new comments a single campaign can enqueue per sweep, so
 // a viral post drains gradually instead of bursting into the comment API.
-const MAX_NEW_PER_SWEEP = Number(process.env.COMMENT_POLL_MAX_PER_SWEEP ?? 30);
+const MAX_NEW_PER_SWEEP = positiveNumberEnv("COMMENT_POLL_MAX_PER_SWEEP", 30);
+
+/** A typo like "24h" would turn the sweep off without a word (NaN filters out every comment). */
+function positiveNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const value = Number(raw);
+  if (raw === undefined) return fallback;
+  if (Number.isFinite(value) && value > 0) return value;
+  console.warn(`[Comment sweep] ${name}="${raw}" is not a positive number; using ${fallback}`);
+  return fallback;
+}
 // For "any post" campaigns, how many recent posts to scan.
 const RECENT_MEDIA_LIMIT = 10;
 

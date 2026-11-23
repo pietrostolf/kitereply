@@ -87,17 +87,30 @@ export interface ProcessFlowReminderJob {
   stepId: string;
 }
 
+/** Another try at a gift the platform could not deliver yet (limit, outage). */
+export interface ProcessGiftRetryJob {
+  accountConnectionId?: string;
+  instagramAccountId: string;
+  userId: string;
+  automationId: string;
+  stepId: string;
+  attempt: number;
+  opId: string;
+}
+
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
   | ProcessMessageJob
-  | ProcessFlowReminderJob;
+  | ProcessFlowReminderJob
+  | ProcessGiftRetryJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
 export const FLOW_REMINDER_JOB_NAME = "process-flow-reminder";
+export const GIFT_RETRY_JOB_NAME = "process-gift-retry";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 

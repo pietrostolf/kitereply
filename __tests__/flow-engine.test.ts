@@ -37,6 +37,7 @@ vi.mock("@/lib/queue/client", () => ({
   getRedisConnection: () => redis,
   getDMQueue: () => ({ add: queueAdd }),
   FLOW_REMINDER_JOB_NAME: "process-flow-reminder",
+  GIFT_RETRY_JOB_NAME: "process-gift-retry",
 }));
 vi.mock("@/lib/db/client", () => ({ prisma: db }));
 vi.mock("@/lib/billing/usage", () => ({ reserveWorkspaceDMSend: usage }));
@@ -51,6 +52,7 @@ import {
   handleFlowAnswer,
   handleFlowPayload,
   normalizeAnswer,
+  retryGift,
   runStep,
   sendFlowReminder,
   type Flow,
@@ -149,6 +151,36 @@ describe("runStep", () => {
     await run("s3");
     expect(db.operationalEvent.create).toHaveBeenCalled();
     expect(sentTexts()).not.toContain("Cheque seu e-mail");
+  });
+  it("queues another try when the platform is at its hourly cap or down, without alerting", async () => {
+    process.env.GIFT_ENDPOINT_URL = "https://gift";
+    process.env.GIFT_ENDPOINT_SECRET = "k";
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, json: async () => ({ result: "limit" }) })));
+    db.contact.upsert.mockResolvedValue({ id: "c1", email: "ana@x.com", tags: [] });
+    await run("s3");
+    expect(queueAdd).toHaveBeenCalledWith("process-gift-retry", expect.objectContaining({ stepId: "s3", attempt: 1, opId: "op1" }), expect.objectContaining({ delay: 30 * 60_000 }));
+    expect(db.operationalEvent.create).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("algumas horas");
+    expect(sentTexts()).not.toContain("Cheque seu e-mail");
+  });
+  it("sends the confirmation once a retried gift goes out", async () => {
+    process.env.GIFT_ENDPOINT_URL = "https://gift";
+    process.env.GIFT_ENDPOINT_SECRET = "k";
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ result: "invited" }) })));
+    db.contact.findUnique.mockResolvedValue({ id: "c1", email: "ana@x.com", username: "ana", tags: [] });
+    await retryGift("a1", "s3", "u1", 2, "op1");
+    expect(sentTexts()).toContain("Cheque seu e-mail");
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+  it("gives up after the last try and alerts a human", async () => {
+    process.env.GIFT_ENDPOINT_URL = "https://gift";
+    process.env.GIFT_ENDPOINT_SECRET = "k";
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("timeout"); }));
+    db.contact.findUnique.mockResolvedValue({ id: "c1", email: "ana@x.com", username: "ana", tags: [] });
+    await retryGift("a1", "s3", "u1", 6, "op1");
+    expect(queueAdd).not.toHaveBeenCalled();
+    expect(db.operationalEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ level: "ERROR" }) }));
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 

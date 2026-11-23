@@ -155,6 +155,28 @@ export function foldDiacritics(text: string): string {
   return out.normalize("NFC");
 }
 
+const EMOJI = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]/u;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Emoji as people see them: whole graphemes, without spaces, variation selectors or skin tones. */
+function emojiGraphemes(text: string): string[] {
+  return [...graphemeSegmenter.segment(text)]
+    .map((g) => g.segment.replace(/[\u{FE0E}\u{FE0F}\u{1F3FB}-\u{1F3FF}]/gu, ""))
+    .filter((g) => g.trim() !== "");
+}
+
+/**
+ * True when `keyword` is made only of emoji and those emoji appear, in order and
+ * whole, in `text`. Whole graphemes keep "🇧🇷" from matching inside "🇦🇧🇷🇺" and
+ * "❤" from matching "❤️‍🔥".
+ */
+function matchesEmojiKeyword(text: string, keyword: string): boolean {
+  const needle = emojiGraphemes(keyword);
+  if (needle.length === 0 || !needle.every((g) => EMOJI.test(g))) return false;
+  const hay = emojiGraphemes(text);
+  return hay.some((_, i) => needle.every((g, j) => hay[i + j] === g));
+}
+
 /**
  * Check if a comment text matches any of the given keywords.
  *
@@ -188,8 +210,8 @@ export function matchKeywords(
 
     if (!cleanedKeyword) {
       // Emoji-only keyword ("🎁"): stripping empties it, so look for the emoji itself.
-      const emoji = keyword.replace(/[\s\u{FE0F}]/gu, "");
-      if (emoji && commentText.replace(/\u{FE0F}/gu, "").includes(emoji)) {
+      // Punctuation-only keywords ("?") stay ignored, as before.
+      if (matchesEmojiKeyword(commentText, keyword)) {
         return { matched: true, matchedKeyword: keyword };
       }
       continue;

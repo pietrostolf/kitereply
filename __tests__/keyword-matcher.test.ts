@@ -206,6 +206,20 @@ describe("matchKeywords — edge cases", () => {
     expect(matchKeywords("quero 🎁🎁", ["🎁"], true).matched).toBe(true);
     expect(matchKeywords("❤️", ["❤"], true).matched).toBe(true); // with or without the variation selector
     expect(matchKeywords("🔥🔥", ["🎁"], true).matched).toBe(false);
+    expect(matchKeywords("👍🏽", ["👍"], true).matched).toBe(true); // skin tone
+    expect(matchKeywords("🎁 🎁", ["🎁🎁"], true).matched).toBe(true);
+    expect(matchKeywords("🎁🎁", ["🎁 🎁"], true).matched).toBe(true);
+  });
+
+  it("should match emoji keywords only as whole emoji", () => {
+    expect(matchKeywords("🇦🇧🇷🇺", ["🇧🇷"], true).matched).toBe(false);
+    expect(matchKeywords("vamos 🇧🇷", ["🇧🇷"], true).matched).toBe(true);
+    expect(matchKeywords("❤️‍🔥", ["❤"], true).matched).toBe(false);
+  });
+
+  it("should keep ignoring punctuation-only keywords", () => {
+    expect(matchKeywords("quanto custa?", ["?"], true).matched).toBe(false);
+    expect(matchKeywords("uau!!!", ["!!!"], true).matched).toBe(false);
   });
 
   it("should match keyword even with surrounding emojis", () => {

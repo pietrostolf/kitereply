@@ -14,7 +14,9 @@ import {
   POSTBACK_JOB_NAME,
   FOLLOWUP_JOB_NAME,
   FLOW_REMINDER_JOB_NAME,
+  GIFT_RETRY_JOB_NAME,
   type DmQueueJob,
+  type ProcessGiftRetryJob,
   type ProcessFlowReminderJob,
   type ProcessCommentJob,
   type ProcessMessageJob,
@@ -22,7 +24,7 @@ import {
   type ProcessFollowUpJob,
 } from "./client";
 import { prisma } from "@/lib/db/client";
-import { getFlow, handleFlowAnswer, handleFlowPayload, isWithHuman, runStep, sendFlowReminder } from "@/lib/flows/engine";
+import { getFlow, handleFlowAnswer, handleFlowPayload, isWithHuman, retryGift, runStep, sendFlowReminder } from "@/lib/flows/engine";
 import {
   MetaApiError,
   RateLimitError,
@@ -1567,6 +1569,10 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   if (job.name === FLOW_REMINDER_JOB_NAME) {
     const { automationId, stepId, userId } = job.data as ProcessFlowReminderJob;
     return sendFlowReminder(automationId, stepId, userId, `reminder:${job.id}`);
+  }
+  if (job.name === GIFT_RETRY_JOB_NAME) {
+    const { automationId, stepId, userId, attempt, opId } = job.data as ProcessGiftRetryJob;
+    return retryGift(automationId, stepId, userId, attempt, opId);
   }
   return processComment(job as Job<ProcessCommentJob>);
 }
